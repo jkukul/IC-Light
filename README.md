@@ -1,4 +1,5 @@
 # IC-Light
+[![Replicate](https://replicate.com/zsxkib/ic-light/badge)](https://replicate.com/zsxkib/ic-light)
 
 IC-Light is a project to manipulate the illumination of images.
 
