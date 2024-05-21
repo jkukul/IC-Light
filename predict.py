@@ -311,7 +311,7 @@ def process_relight(
         bg_source,
     )
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    return results + extra_images
+    return results  # + extra_images
 
 
 @torch.inference_mode()
@@ -839,4 +839,4 @@ class Predictor(BasePredictor):
             Image.fromarray(img).save(img_path, **save_params)
             output_paths.append(Path(img_path))
 
-        return output_paths
+        return output_paths[::-1]
