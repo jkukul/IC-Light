@@ -157,6 +157,7 @@ def run_rmbg(img, sigma=0.0):
 @torch.inference_mode()
 def process(
     input_fg,
+    input_bg,
     prompt,
     image_width,
     image_height,
@@ -168,83 +169,64 @@ def process(
     cfg,
     highres_scale,
     highres_denoise,
-    lowres_denoise,
     bg_source,
 ):
     bg_source = BGSource(bg_source)
-    input_bg = None
 
-    if bg_source == BGSource.NONE:
+    if bg_source == BGSource.UPLOAD:
         pass
+    elif bg_source == BGSource.UPLOAD_FLIP:
+        input_bg = np.fliplr(input_bg)
+    elif bg_source == BGSource.GREY:
+        input_bg = np.zeros(shape=(image_height, image_width, 3), dtype=np.uint8) + 64
     elif bg_source == BGSource.LEFT:
-        gradient = np.linspace(255, 0, image_width)
+        gradient = np.linspace(224, 32, image_width)
         image = np.tile(gradient, (image_height, 1))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.RIGHT:
-        gradient = np.linspace(0, 255, image_width)
+        gradient = np.linspace(32, 224, image_width)
         image = np.tile(gradient, (image_height, 1))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.TOP:
-        gradient = np.linspace(255, 0, image_height)[:, None]
+        gradient = np.linspace(224, 32, image_height)[:, None]
         image = np.tile(gradient, (1, image_width))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     elif bg_source == BGSource.BOTTOM:
-        gradient = np.linspace(0, 255, image_height)[:, None]
+        gradient = np.linspace(32, 224, image_height)[:, None]
         image = np.tile(gradient, (1, image_width))
         input_bg = np.stack((image,) * 3, axis=-1).astype(np.uint8)
     else:
-        raise "Wrong initial latent!"
+        raise "Wrong background source!"
 
-    rng = torch.Generator(device=device).manual_seed(int(seed))
+    rng = torch.Generator(device=device).manual_seed(seed)
 
     fg = resize_and_center_crop(input_fg, image_width, image_height)
-
-    concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
+    bg = resize_and_center_crop(input_bg, image_width, image_height)
+    concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = (
         vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
     )
+    concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
 
     conds, unconds = encode_prompt_pair(
         positive_prompt=prompt + ", " + a_prompt, negative_prompt=n_prompt
     )
 
-    if input_bg is None:
-        latents = (
-            t2i_pipe(
-                prompt_embeds=conds,
-                negative_prompt_embeds=unconds,
-                width=image_width,
-                height=image_height,
-                num_inference_steps=steps,
-                num_images_per_prompt=num_samples,
-                generator=rng,
-                output_type="latent",
-                guidance_scale=cfg,
-                cross_attention_kwargs={"concat_conds": concat_conds},
-            ).images.to(vae.dtype)
-            / vae.config.scaling_factor
-        )
-    else:
-        bg = resize_and_center_crop(input_bg, image_width, image_height)
-        bg_latent = numpy2pytorch([bg]).to(device=vae.device, dtype=vae.dtype)
-        bg_latent = vae.encode(bg_latent).latent_dist.mode() * vae.config.scaling_factor
-        latents = (
-            i2i_pipe(
-                image=bg_latent,
-                strength=lowres_denoise,
-                prompt_embeds=conds,
-                negative_prompt_embeds=unconds,
-                width=image_width,
-                height=image_height,
-                num_inference_steps=int(round(steps / lowres_denoise)),
-                num_images_per_prompt=num_samples,
-                generator=rng,
-                output_type="latent",
-                guidance_scale=cfg,
-                cross_attention_kwargs={"concat_conds": concat_conds},
-            ).images.to(vae.dtype)
-            / vae.config.scaling_factor
-        )
+    latents = (
+        t2i_pipe(
+            prompt_embeds=conds,
+            negative_prompt_embeds=unconds,
+            width=image_width,
+            height=image_height,
+            num_inference_steps=steps,
+            num_images_per_prompt=num_samples,
+            generator=rng,
+            output_type="latent",
+            guidance_scale=cfg,
+            cross_attention_kwargs={"concat_conds": concat_conds},
+        ).images.to(vae.dtype)
+        / vae.config.scaling_factor
+    )
 
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels)
@@ -262,12 +244,13 @@ def process(
     latents = latents.to(device=unet.device, dtype=unet.dtype)
 
     image_height, image_width = latents.shape[2] * 8, latents.shape[3] * 8
-
     fg = resize_and_center_crop(input_fg, image_width, image_height)
-    concat_conds = numpy2pytorch([fg]).to(device=vae.device, dtype=vae.dtype)
+    bg = resize_and_center_crop(input_bg, image_width, image_height)
+    concat_conds = numpy2pytorch([fg, bg]).to(device=vae.device, dtype=vae.dtype)
     concat_conds = (
         vae.encode(concat_conds).latent_dist.mode() * vae.config.scaling_factor
     )
+    concat_conds = torch.cat([c[None, ...] for c in concat_conds], dim=1)
 
     latents = (
         i2i_pipe(
@@ -288,13 +271,15 @@ def process(
     )
 
     pixels = vae.decode(latents).sample
+    pixels = pytorch2numpy(pixels, quant=False)
 
-    return pytorch2numpy(pixels)
+    return pixels, [fg, bg]
 
 
 @torch.inference_mode()
 def process_relight(
     input_fg,
+    input_bg,
     prompt,
     image_width,
     image_height,
@@ -306,12 +291,12 @@ def process_relight(
     cfg,
     highres_scale,
     highres_denoise,
-    lowres_denoise,
     bg_source,
 ):
     input_fg, matting = run_rmbg(input_fg)
-    results = process(
+    results, extra_images = process(
         input_fg,
+        input_bg,
         prompt,
         image_width,
         image_height,
@@ -323,18 +308,154 @@ def process_relight(
         cfg,
         highres_scale,
         highres_denoise,
-        lowres_denoise,
         bg_source,
     )
-    return input_fg, results
+    results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
+    return results + extra_images
+
+
+@torch.inference_mode()
+def process_normal(
+    input_fg,
+    input_bg,
+    prompt,
+    image_width,
+    image_height,
+    num_samples,
+    seed,
+    steps,
+    a_prompt,
+    n_prompt,
+    cfg,
+    highres_scale,
+    highres_denoise,
+    bg_source,
+):
+    input_fg, matting = run_rmbg(input_fg, sigma=16)
+
+    print("left ...")
+    left = process(
+        input_fg,
+        input_bg,
+        prompt,
+        image_width,
+        image_height,
+        1,
+        seed,
+        steps,
+        a_prompt,
+        n_prompt,
+        cfg,
+        highres_scale,
+        highres_denoise,
+        BGSource.LEFT.value,
+    )[0][0]
+
+    print("right ...")
+    right = process(
+        input_fg,
+        input_bg,
+        prompt,
+        image_width,
+        image_height,
+        1,
+        seed,
+        steps,
+        a_prompt,
+        n_prompt,
+        cfg,
+        highres_scale,
+        highres_denoise,
+        BGSource.RIGHT.value,
+    )[0][0]
+
+    print("bottom ...")
+    bottom = process(
+        input_fg,
+        input_bg,
+        prompt,
+        image_width,
+        image_height,
+        1,
+        seed,
+        steps,
+        a_prompt,
+        n_prompt,
+        cfg,
+        highres_scale,
+        highres_denoise,
+        BGSource.BOTTOM.value,
+    )[0][0]
+
+    print("top ...")
+    top = process(
+        input_fg,
+        input_bg,
+        prompt,
+        image_width,
+        image_height,
+        1,
+        seed,
+        steps,
+        a_prompt,
+        n_prompt,
+        cfg,
+        highres_scale,
+        highres_denoise,
+        BGSource.TOP.value,
+    )[0][0]
+
+    inner_results = [
+        left * 2.0 - 1.0,
+        right * 2.0 - 1.0,
+        bottom * 2.0 - 1.0,
+        top * 2.0 - 1.0,
+    ]
+
+    ambient = (left + right + bottom + top) / 4.0
+    h, w, _ = ambient.shape
+    matting = (
+        resize_and_center_crop(
+            (matting[..., 0] * 255.0).clip(0, 255).astype(np.uint8), w, h
+        ).astype(np.float32)[..., None]
+        / 255.0
+    )
+
+    def safa_divide(a, b):
+        e = 1e-5
+        return ((a + e) / (b + e)) - 1.0
+
+    left = safa_divide(left, ambient)
+    right = safa_divide(right, ambient)
+    bottom = safa_divide(bottom, ambient)
+    top = safa_divide(top, ambient)
+
+    u = (right - left) * 0.5
+    v = (top - bottom) * 0.5
+
+    sigma = 10.0
+    u = np.mean(u, axis=2)
+    v = np.mean(v, axis=2)
+    h = (1.0 - u**2.0 - v**2.0).clip(0, 1e5) ** (0.5 * sigma)
+    z = np.zeros_like(h)
+
+    normal = np.stack([u, v, h], axis=2)
+    normal /= np.sum(normal**2.0, axis=2, keepdims=True) ** 0.5
+    normal = normal * matting + np.stack([z, z, 1 - z], axis=2) * (1 - matting)
+
+    results = [normal, left, right, bottom, top] + inner_results
+    results = [(x * 127.5 + 127.5).clip(0, 255).astype(np.uint8) for x in results]
+    return results
 
 
 class BGSource(Enum):
-    NONE = "None"
+    UPLOAD = "Use Background Image"
+    UPLOAD_FLIP = "Use Flipped Background Image"
     LEFT = "Left Light"
     RIGHT = "Right Light"
     TOP = "Top Light"
     BOTTOM = "Bottom Light"
+    GREY = "Ambient"
 
 
 def download_weights(url: str, dest: str) -> None:
@@ -362,7 +483,8 @@ class Predictor(BasePredictor):
 
         """Load the model into memory to make running multiple predictions efficient"""
         model_files = [
-            "iclight_sd15_fc.safetensors",
+            # "iclight_sd15_fc.safetensors",
+            "iclight_sd15_fbc.safetensors",
             "models--briaai--RMBG-1.4.tar",
             "models--stablediffusionapi--realistic-vision-v51.tar",
         ]
@@ -422,7 +544,7 @@ class Predictor(BasePredictor):
 
         with torch.no_grad():
             new_conv_in = torch.nn.Conv2d(
-                8,
+                12,
                 unet.conv_in.out_channels,
                 unet.conv_in.kernel_size,
                 unet.conv_in.stride,
@@ -439,7 +561,7 @@ class Predictor(BasePredictor):
 
         # Load
 
-        model_path = f"./{MODEL_CACHE}/iclight_sd15_fc.safetensors"
+        model_path = f"./{MODEL_CACHE}/iclight_sd15_fbc.safetensors"
 
         sd_offset = sf.load_file(model_path)
         sd_origin = unet.state_dict()
@@ -541,6 +663,9 @@ class Predictor(BasePredictor):
         subject_image: Path = Input(
             description="The main foreground image to be relighted"
         ),
+        background_image: Path = Input(
+            description="The background image that will be used to relight the main foreground image"
+        ),
         prompt: str = Input(
             description="A text description guiding the relighting and generation process"
         ),
@@ -551,6 +676,10 @@ class Predictor(BasePredictor):
         negative_prompt: str = Input(
             default="lowres, bad anatomy, bad hands, cropped, worst quality",
             description="A text description of attributes to avoid in the generated images",
+        ),
+        compute_normal: bool = Input(
+            default=False,
+            description="Whether to compute the normal maps (slower but provides additional output images)",
         ),
         width: int = Input(
             default=512,
@@ -586,14 +715,14 @@ class Predictor(BasePredictor):
             ge=0.1,
             le=1.0,
         ),
-        lowres_denoise: float = Input(
-            default=0.9,
-            description="Controls the amount of denoising applied when generating the initial latent from the background image (higher = more adherence to the background, lower = more creative interpretation)",
-            ge=0.1,
-            le=1.0,
-        ),
+        # lowres_denoise: float = Input(
+        #     default=0.9,
+        #     description="Controls the amount of denoising applied when generating the initial latent from the background image (higher = more adherence to the background, lower = more creative interpretation)",
+        #     ge=0.1,
+        #     le=1.0,
+        # ),
         light_source: str = Input(
-            default=BGSource.NONE.value,
+            default=BGSource.UPLOAD.value,
             description="The type and position of lighting to apply to the initial background latent",
             choices=[e.value for e in BGSource],
         ),
@@ -624,6 +753,7 @@ class Predictor(BasePredictor):
         print(f"Using seed: {seed}")
 
         input_fg = subject_image
+        input_bg = background_image
         image_width = width
         image_height = height
         num_samples = number_of_images
@@ -632,6 +762,7 @@ class Predictor(BasePredictor):
         bg_source = light_source
 
         print(f"[!] ({type(input_fg)}) input_fg={input_fg}")
+        print(f"[!] ({type(input_bg)}) input_bg={input_bg}")
         print(f"[!] ({type(prompt)}) prompt={prompt}")
         print(f"[!] ({type(image_width)}) image_width={image_width}")
         print(f"[!] ({type(image_height)}) image_height={image_height}")
@@ -643,46 +774,63 @@ class Predictor(BasePredictor):
         print(f"[!] ({type(cfg)}) cfg={cfg}")
         print(f"[!] ({type(highres_scale)}) highres_scale={highres_scale}")
         print(f"[!] ({type(highres_denoise)}) highres_denoise={highres_denoise}")
-        print(f"[!] ({type(lowres_denoise)}) lowres_denoise={lowres_denoise}")
+        # print(f"[!] ({type(lowres_denoise)}) lowres_denoise={lowres_denoise}")
         print(f"[!] ({type(bg_source)}) bg_source={bg_source}")
         input_fg_np = np.array(Image.open(str(input_fg))) if input_fg else None
+        input_bg_np = np.array(Image.open(str(input_bg))) if input_bg else None
 
         with torch.inference_mode():
-            output_bg, result_gallery = process_relight(
-                input_fg_np,
-                prompt,
-                image_width,
-                image_height,
-                num_samples,
-                seed,
-                steps,
-                a_prompt,
-                n_prompt,
-                cfg,
-                highres_scale,
-                highres_denoise,
-                lowres_denoise,
-                bg_source,
-            )
+            if compute_normal:
+                result_images = process_normal(
+                    input_fg_np,
+                    input_bg_np,
+                    prompt,
+                    image_width,
+                    image_height,
+                    num_samples,
+                    seed,
+                    steps,
+                    a_prompt,
+                    n_prompt,
+                    cfg,
+                    highres_scale,
+                    highres_denoise,
+                    bg_source,
+                )
+            else:
+                result_images = process_relight(
+                    input_fg_np,
+                    input_bg_np,
+                    prompt,
+                    image_width,
+                    image_height,
+                    num_samples,
+                    seed,
+                    steps,
+                    a_prompt,
+                    n_prompt,
+                    cfg,
+                    highres_scale,
+                    highres_denoise,
+                    bg_source,
+                )
 
         # Create a directory to save the output images
         output_dir = "output_images"
         os.makedirs(output_dir, exist_ok=True)
 
-        # Save the background image
+        # Save the generated images
         extension = output_format.lower()
         extension = "jpeg" if extension == "jpg" else extension
-        bg_path = os.path.join(output_dir, f"background.{extension}")
         save_params = {"format": extension.upper()}
         if output_format != "png":
             save_params["quality"] = output_quality
             save_params["optimize"] = True
-        Image.fromarray(output_bg).save(bg_path, **save_params)
 
-        # Save the generated images
-        output_paths = [Path(bg_path)]
-        for i, img in enumerate(result_gallery):
-            img_path = os.path.join(output_dir, f"generated_{i}.{extension}")
+        output_paths = []
+        for i, img in enumerate(result_images):
+            img_name = f"generated_{i}" if not compute_normal else f"normal_{i}"
+            img_path = os.path.join(output_dir, f"{img_name}.{extension}")
             print(f"[~] Saving to {img_path}...")
             print(f"[~] Output format: {extension.upper()}")
             if output_format != "png":
