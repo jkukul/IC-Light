@@ -140,8 +140,35 @@ def resize_without_crop(image, target_width, target_height):
 
 @torch.inference_mode()
 def run_rmbg(img, sigma=0.0):
+    """Remove background or re-use provided alpha channel.
+
+    Behaviour:
+    • If the incoming image has 3 channels → run Bria-RMBG to predict an alpha matte.
+    • If the incoming image already has 4 channels (RGBA) → use the existing alpha channel
+      directly and **skip** the expensive RMBG call. This allows users to supply pre-
+      matted PNGs while keeping the rest of the pipeline unchanged.
+    """
+
     H, W, C = img.shape
-    assert C == 3
+
+    # Case 1 ─ RGBA image supplied by the user (background already removed)
+    if C == 4:
+        # Split RGB and alpha, normalise alpha to 0-1 float32
+        rgb = img[..., :3].astype(np.float32)
+        alpha = img[..., 3].astype(np.float32) / 255.0  # shape (H, W)
+
+        # Apply the same sigma processing as in the original function so behaviour
+        # remains consistent with the RMBG branch.
+        result = 127 + (rgb - 127 + sigma) * alpha[..., None]
+        return result.clip(0, 255).astype(np.uint8), alpha
+
+    # Case 2 ─ Ordinary RGB image → fall back to Bria-RMBG
+    if C != 3:
+        # Convert anything else (e.g. grayscale) to RGB first
+        img = Image.fromarray(img).convert("RGB")
+        img = np.array(img)
+
+    # Case 3 ─ Ordinary RGB image → fall back to Bria-RMBG
     k = (256.0 / float(H * W)) ** 0.5
     feed = resize_without_crop(img, int(64 * round(W * k)), int(64 * round(H * k)))
     feed = numpy2pytorch([feed]).to(device=device, dtype=torch.float32)
