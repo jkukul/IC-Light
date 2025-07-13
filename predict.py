@@ -5,7 +5,6 @@ import time
 import os
 import math
 import torch
-import tempfile
 import mimetypes
 import subprocess
 import numpy as np
@@ -273,7 +272,7 @@ def process(
     pixels = vae.decode(latents).sample
     pixels = pytorch2numpy(pixels, quant=False)
 
-    return pixels, [fg, bg]
+    return pixels
 
 
 @torch.inference_mode()
@@ -294,7 +293,7 @@ def process_relight(
     bg_source,
 ):
     input_fg, matting = run_rmbg(input_fg)
-    results, extra_images = process(
+    results = process(
         input_fg,
         input_bg,
         prompt,
@@ -311,7 +310,7 @@ def process_relight(
         bg_source,
     )
     results = [(x * 255.0).clip(0, 255).astype(np.uint8) for x in results]
-    return results  # + extra_images
+    return results
 
 
 @torch.inference_mode()
@@ -321,7 +320,6 @@ def process_normal(
     prompt,
     image_width,
     image_height,
-    num_samples,
     seed,
     steps,
     a_prompt,
@@ -329,7 +327,6 @@ def process_normal(
     cfg,
     highres_scale,
     highres_denoise,
-    bg_source,
 ):
     input_fg, matting = run_rmbg(input_fg, sigma=16)
 
@@ -349,7 +346,7 @@ def process_normal(
         highres_scale,
         highres_denoise,
         BGSource.LEFT.value,
-    )[0][0]
+    )[0]
 
     print("right ...")
     right = process(
@@ -367,7 +364,7 @@ def process_normal(
         highres_scale,
         highres_denoise,
         BGSource.RIGHT.value,
-    )[0][0]
+    )[0]
 
     print("bottom ...")
     bottom = process(
@@ -385,7 +382,7 @@ def process_normal(
         highres_scale,
         highres_denoise,
         BGSource.BOTTOM.value,
-    )[0][0]
+    )[0]
 
     print("top ...")
     top = process(
@@ -403,7 +400,7 @@ def process_normal(
         highres_scale,
         highres_denoise,
         BGSource.TOP.value,
-    )[0][0]
+    )[0]
 
     inner_results = [
         left * 2.0 - 1.0,
@@ -715,12 +712,6 @@ class Predictor(BasePredictor):
             ge=0.1,
             le=1.0,
         ),
-        # lowres_denoise: float = Input(
-        #     default=0.9,
-        #     description="Controls the amount of denoising applied when generating the initial latent from the background image (higher = more adherence to the background, lower = more creative interpretation)",
-        #     ge=0.1,
-        #     le=1.0,
-        # ),
         light_source: str = Input(
             default=BGSource.UPLOAD.value,
             description="The type and position of lighting to apply to the initial background latent",
@@ -774,7 +765,6 @@ class Predictor(BasePredictor):
         print(f"[!] ({type(cfg)}) cfg={cfg}")
         print(f"[!] ({type(highres_scale)}) highres_scale={highres_scale}")
         print(f"[!] ({type(highres_denoise)}) highres_denoise={highres_denoise}")
-        # print(f"[!] ({type(lowres_denoise)}) lowres_denoise={lowres_denoise}")
         print(f"[!] ({type(bg_source)}) bg_source={bg_source}")
         input_fg_np = np.array(Image.open(str(input_fg))) if input_fg else None
         input_bg_np = np.array(Image.open(str(input_bg))) if input_bg else None
@@ -787,7 +777,6 @@ class Predictor(BasePredictor):
                     prompt,
                     image_width,
                     image_height,
-                    num_samples,
                     seed,
                     steps,
                     a_prompt,
@@ -795,7 +784,6 @@ class Predictor(BasePredictor):
                     cfg,
                     highres_scale,
                     highres_denoise,
-                    bg_source,
                 )
             else:
                 result_images = process_relight(
