@@ -9,7 +9,7 @@ import tempfile
 import mimetypes
 import subprocess
 import numpy as np
-from typing import List
+from typing import List, Optional
 import safetensors.torch as sf
 from cog import BasePredictor, Input, Path
 
@@ -195,7 +195,7 @@ def process(
     else:
         raise "Wrong initial latent!"
 
-    rng = torch.Generator(device=device).manual_seed(int(seed))
+    rng = torch.Generator(device=device).manual_seed(seed)
 
     fg = resize_and_center_crop(input_fg, image_width, image_height)
 
@@ -597,7 +597,7 @@ class Predictor(BasePredictor):
             description="The type and position of lighting to apply to the initial background latent",
             choices=[e.value for e in BGSource],
         ),
-        seed: int = Input(
+        seed: Optional[int] = Input(
             description="A fixed random seed for reproducible results (omit this parameter for a randomized seed)",
             default=None,
         ),
