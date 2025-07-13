@@ -5,7 +5,6 @@ import time
 import os
 import math
 import torch
-import tempfile
 import mimetypes
 import subprocess
 import numpy as np
@@ -309,7 +308,7 @@ def process_relight(
     lowres_denoise,
     bg_source,
 ):
-    input_fg, matting = run_rmbg(input_fg)
+    input_fg, _ = run_rmbg(input_fg)
     results = process(
         input_fg,
         prompt,
@@ -326,7 +325,7 @@ def process_relight(
         lowres_denoise,
         bg_source,
     )
-    return input_fg, results
+    return results
 
 
 class BGSource(Enum):
@@ -648,7 +647,7 @@ class Predictor(BasePredictor):
         input_fg_np = np.array(Image.open(str(input_fg))) if input_fg else None
 
         with torch.inference_mode():
-            output_bg, result_gallery = process_relight(
+            result_gallery = process_relight(
                 input_fg_np,
                 prompt,
                 image_width,
@@ -679,8 +678,7 @@ class Predictor(BasePredictor):
             save_params["optimize"] = True
         # Image.fromarray(output_bg).save(bg_path, **save_params)
 
-        # Save the generated images
-        output_paths = [] #[Path(bg_path)]
+        output_paths = []
         for i, img in enumerate(result_gallery):
             img_path = os.path.join(output_dir, f"generated_{i}.{extension}")
             print(f"[~] Saving to {img_path}...")
